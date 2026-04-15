@@ -1,7 +1,7 @@
 # gui
 
 ```
-Launch the komorebi-gui debugging tool
+Launch the komorebi GUI dashboard
 
 Usage: komorebic.exe gui
 

@@ -9,8 +9,4 @@ edition = "2024"
 komorebi-client = { path = "../komorebi-client", default-features = false }
 
 eframe = { workspace = true }
-egui_extras = { workspace = true }
-random_word = { version = "0.5", features = ["en"] }
 serde_json = { workspace = true }
-windows-core = { workspace = true }
-windows = { workspace = true }
