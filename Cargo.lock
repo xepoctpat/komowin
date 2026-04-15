@@ -3289,12 +3289,8 @@ name = "komorebi-gui"
 version = "0.1.41"
 dependencies = [
  "eframe",
- "egui_extras",
  "komorebi-client",
- "random_word",
  "serde_json_lenient",
- "windows 0.62.2",
- "windows-core 0.62.2",
 ]
 
 [[package]]
