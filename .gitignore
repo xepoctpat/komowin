@@ -13,3 +13,5 @@ komorebic/applications.json
 result
 /.direnv
 procdump.exe
+/dashboard-capture*.png
+/komorebi-dashboard-*.png
