@@ -164,6 +164,14 @@ impl DashboardMonitor {
 
         format!("Monitor {} · {name}", self.index + 1)
     }
+
+    fn active_workspace(&self) -> DesktopWorkspace {
+        self.workspaces
+            .get(self.focused_workspace_idx)
+            .cloned()
+            .or_else(|| self.workspaces.first().cloned())
+            .unwrap_or_else(|| DesktopWorkspace::placeholder(self.focused_workspace_idx))
+    }
 }
 
 impl DesktopWorkspace {
@@ -500,6 +508,23 @@ impl KomorebiGui {
         self.selected_monitor = monitor_index.min(self.dashboard.monitors.len().saturating_sub(1));
         self.name_dirty = [false; DASHBOARD_DESKTOP_COUNT];
         self.sync_name_inputs(true);
+    }
+
+    fn focus_monitor(&mut self, monitor_index: usize) {
+        self.select_monitor(monitor_index);
+        self.send_message(SocketMessage::FocusMonitorNumber(monitor_index));
+    }
+
+    fn move_active_to_monitor(&mut self, monitor_index: usize, follow: bool) {
+        self.select_monitor(monitor_index);
+
+        let message = if follow {
+            SocketMessage::MoveContainerToMonitorNumber(monitor_index)
+        } else {
+            SocketMessage::SendContainerToMonitorNumber(monitor_index)
+        };
+
+        self.send_message(message);
     }
 
     fn requested_workspace_name(&self, workspace_idx: usize) -> String {
@@ -850,10 +875,13 @@ impl KomorebiGui {
             return (Color32::from_rgb(240, 113, 120), error.clone());
         }
 
-        if self.pending_start_and_setup.is_some() {
+        if let Some(monitor_index) = self.pending_start_and_setup {
             return (
                 Color32::from_rgb(121, 173, 255),
-                String::from("starting komorebi and waiting to apply the 2-desktop setup..."),
+                format!(
+                    "starting komorebi and waiting to apply the screen setup on Monitor {}...",
+                    monitor_index + 1
+                ),
             );
         }
 
@@ -873,6 +901,107 @@ impl KomorebiGui {
             Color32::from_rgb(240, 205, 90),
             String::from("waiting for komorebi state"),
         )
+    }
+
+    fn monitor_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        monitor: DashboardMonitor,
+        is_selected: bool,
+        is_focused_monitor: bool,
+    ) {
+        let ready = self.two_desktop_setup_ready_for_monitor(monitor.index);
+        let active_workspace = monitor.active_workspace();
+        let active_label = DESKTOP_LABELS
+            .get(active_workspace.index)
+            .copied()
+            .unwrap_or("Active desktop");
+        let fill = if is_selected {
+            Color32::from_rgb(42, 58, 86)
+        } else {
+            ui.visuals().faint_bg_color
+        };
+
+        egui::Frame::group(ui.style()).fill(fill).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(monitor.short_label()).strong());
+
+                if is_selected {
+                    ui.label(
+                        RichText::new("ADVANCED PANEL")
+                            .strong()
+                            .color(Color32::LIGHT_GREEN),
+                    );
+                }
+
+                if is_focused_monitor {
+                    ui.label(
+                        RichText::new("FOCUSED")
+                            .strong()
+                            .color(Color32::from_rgb(121, 173, 255)),
+                    );
+                }
+            });
+
+            ui.small(format!("{}×{}", monitor.size.right, monitor.size.bottom));
+            ui.label(
+                RichText::new(format!(
+                    "Current internal desktop: {}",
+                    active_workspace.display_name(active_label)
+                ))
+                .strong(),
+            );
+            ui.small(active_workspace.status_line(active_label));
+            ui.small("For a simple TV-vs-monitor workflow, treat this card as the screen itself. The internal desktop/workspace layer is only for advanced komorebi control.");
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if is_selected {
+                    ui.add_enabled(false, egui::Button::new("Advanced controls below"));
+                } else if ui.button("Open advanced controls").clicked() {
+                    self.select_monitor(monitor.index);
+                }
+
+                if ui.button("Focus this screen").clicked() {
+                    self.focus_monitor(monitor.index);
+                }
+
+                if ui.button("Move active window here").clicked() {
+                    self.move_active_to_monitor(monitor.index, true);
+                }
+
+                if ui.button("Send active window here").clicked() {
+                    self.move_active_to_monitor(monitor.index, false);
+                }
+
+                if ui
+                    .button(if ready {
+                        "Reapply screen setup"
+                    } else {
+                        "Set up this screen"
+                    })
+                    .clicked()
+                {
+                    self.start_and_setup_two_desktops_for_monitor(monitor.index);
+                }
+            });
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("What is on this screen right now").strong());
+
+            if active_workspace.window_summaries.is_empty() {
+                ui.small("No windows are currently on the active internal desktop for this screen.");
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(170.0)
+                    .show(ui, |ui| {
+                        for summary in &active_workspace.window_summaries {
+                            ui.label(summary);
+                        }
+                    });
+            }
+        });
     }
 
     fn workspace_card(
@@ -1068,7 +1197,7 @@ impl eframe::App for KomorebiGui {
             ui.horizontal_wrapped(|ui| {
                 if let Some(monitor) = current_monitor_preview.as_ref() {
                     ui.label(
-                        RichText::new(format!("Editing {}", monitor.title()))
+                        RichText::new(format!("Advanced controls open for {}", monitor.title()))
                             .strong()
                             .color(Color32::LIGHT_GREEN),
                     );
@@ -1107,12 +1236,12 @@ impl eframe::App for KomorebiGui {
 
             if let Some(monitor) = current_monitor_preview.as_ref() {
                 ui.small(format!(
-                    "You are editing {} only. There is no shared cross-monitor setting here — each physical monitor keeps its own Desktop 1 + Desktop 2 pair.",
+                    "Simple view first: use the physical screen cards below to place apps on one screen or the other. {} is only the current advanced target.",
                     monitor.short_label()
                 ));
 
                 ui.small(format!(
-                    "{} is currently focused on desktop {}. The dashboard intentionally exposes the first two desktops only.",
+                    "{} is currently focused on internal desktop {}. The dashboard still only exposes the first two internal desktops when you open advanced controls.",
                     monitor.short_label(),
                     monitor.focused_workspace_idx + 1
                 ));
@@ -1135,7 +1264,7 @@ impl eframe::App for KomorebiGui {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Quick setup");
-            ui.small("For the dashboard-only flow, Step 1 is optional. The one required action is Step 3: apply the 2-desktop setup to the specific physical monitor you want to manage.");
+            ui.small("For the dashboard-only flow, Step 1 is optional. Step 3 is mostly one-time plumbing so the simple physical-screen controls below can work without dragging you through internal workspace details.");
             ui.add_space(10.0);
 
             ui.columns(3, |columns| {
@@ -1219,13 +1348,13 @@ impl eframe::App for KomorebiGui {
                     let two_desktops_ready = self.two_desktop_setup_ready();
 
                     ui.heading(if has_multiple_monitors {
-                        "3. Two desktops per monitor"
+                        "3. One-time screen plumbing"
                     } else {
                         "3. Two desktops (required)"
                     });
                     ui.label(
                         RichText::new(if has_multiple_monitors {
-                            "Use an explicit monitor button below"
+                            "Usually one-time"
                         } else if two_desktops_ready {
                             "Ready on this monitor"
                         } else {
@@ -1248,7 +1377,7 @@ impl eframe::App for KomorebiGui {
                     }
 
                     if has_multiple_monitors {
-                        ui.small("Each physical monitor keeps its own Desktop 1 + Desktop 2 pair. The buttons below target one screen explicitly so the setup never feels shared or ambiguous.");
+                        ui.small("Komorebi keeps internal workspaces behind each physical screen. These buttons prepare that plumbing explicitly per screen, but for daily TV-vs-monitor moves you should use the physical screen cards below.");
                     } else if !two_desktops_ready {
                         ui.small("This creates or updates Desktop 1 and Desktop 2 for the current monitor and keeps tiling off on both by default so your open windows do not get rearranged unexpectedly.");
                     } else {
@@ -1315,87 +1444,22 @@ impl eframe::App for KomorebiGui {
 
             ui.add_space(14.0);
 
-            if monitor_overview.len() > 1 {
-                ui.heading("Choose which monitor to edit");
-                ui.small("Nothing here is shared across screens. Clicking a card only changes the desktop editor below for that physical monitor, and each card can also apply setup directly to itself.");
+            if !monitor_overview.is_empty() {
+                ui.heading("Physical screens");
+                ui.small("Start here for day-to-day use. Each card below is an actual display, so moving a window to TV vs Monitor happens here without making you think about internal desktops first.");
                 ui.add_space(8.0);
 
                 ui.columns(monitor_overview.len().min(4), |columns| {
                     for (column, monitor) in columns.iter_mut().zip(monitor_overview.iter()) {
-                        let desktop_one = monitor
-                            .workspaces
-                            .get(0)
-                            .cloned()
-                            .unwrap_or_else(|| DesktopWorkspace::placeholder(0));
-                        let desktop_two = monitor
-                            .workspaces
-                            .get(1)
-                            .cloned()
-                            .unwrap_or_else(|| DesktopWorkspace::placeholder(1));
                         let is_selected = self.selected_monitor == monitor.index;
                         let is_focused_monitor = self.dashboard.focused_monitor_idx == monitor.index;
-                        let ready = self.two_desktop_setup_ready_for_monitor(monitor.index);
 
-                        let mut frame = egui::Frame::group(column.style());
-                        if is_selected {
-                            frame = frame.fill(Color32::from_rgb(42, 58, 86));
-                        }
-
-                        frame.show(column, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(monitor.short_label()).strong());
-
-                                if is_selected {
-                                    ui.label(
-                                        RichText::new("SELECTED")
-                                            .strong()
-                                            .color(Color32::LIGHT_GREEN),
-                                    );
-                                }
-
-                                if is_focused_monitor {
-                                    ui.label(
-                                        RichText::new("FOCUSED")
-                                            .strong()
-                                            .color(Color32::from_rgb(121, 173, 255)),
-                                    );
-                                }
-                            });
-
-                            ui.small(format!("{}×{}", monitor.size.right, monitor.size.bottom));
-                            ui.small(desktop_one.status_line(DESKTOP_LABELS[0]));
-                            ui.small(desktop_two.status_line(DESKTOP_LABELS[1]));
-                            ui.small(if ready {
-                                "This monitor already has Desktop 1 + Desktop 2 provisioned."
-                            } else {
-                                "This monitor still needs the 2-desktop setup applied."
-                            });
-                            ui.add_space(6.0);
-
-                            let button_label = if is_selected {
-                                "Editing this monitor"
-                            } else {
-                                "Edit this monitor"
-                            };
-
-                            if ui
-                                .add_enabled(!is_selected, egui::Button::new(button_label))
-                                .clicked()
-                            {
-                                self.select_monitor(monitor.index);
-                            }
-
-                            if ui
-                                .button(if ready {
-                                    "Reapply 2 desktops here"
-                                } else {
-                                    "Set up 2 desktops here"
-                                })
-                                .clicked()
-                            {
-                                self.start_and_setup_two_desktops_for_monitor(monitor.index);
-                            }
-                        });
+                        self.monitor_card(
+                            column,
+                            monitor.clone(),
+                            is_selected,
+                            is_focused_monitor,
+                        );
                     }
                 });
 
@@ -1403,75 +1467,99 @@ impl eframe::App for KomorebiGui {
             }
 
             if let Some(monitor) = current_monitor {
-                egui::Frame::group(ui.style())
-                    .fill(Color32::from_rgb(28, 40, 60))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(format!("Desktop settings for {}", monitor.title())).strong());
-
-                            if self.dashboard.focused_monitor_idx == monitor.index {
-                                ui.label(
-                                    RichText::new("currently focused monitor")
-                                        .color(Color32::LIGHT_GREEN)
-                                        .strong(),
-                                );
-                            }
-                        });
-
-                        ui.small(format!(
-                            "Everything below changes {} only. The other physical monitor keeps its own desktop names, tiling mode, and layouts.",
-                            monitor.short_label()
-                        ));
-                    });
-
+                ui.small("If you only care about TV-vs-monitor placement, you can stop at the physical screen cards above. Open the section below only when you want direct control over komorebi's internal desktops on the selected screen.");
                 ui.add_space(10.0);
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.small(format!("Quick switch on {}:", monitor.short_label()));
+                egui::CollapsingHeader::new(format!(
+                    "Advanced: internal desktops on {}",
+                    monitor.short_label()
+                ))
+                .default_open(!has_multiple_monitors)
+                .show(ui, |ui| {
+                    egui::Frame::group(ui.style())
+                        .fill(Color32::from_rgb(28, 40, 60))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Advanced workspace controls for {}",
+                                        monitor.title()
+                                    ))
+                                    .strong(),
+                                );
 
-                    for workspace_idx in 0..DASHBOARD_DESKTOP_COUNT {
-                        let workspace = monitor
-                            .workspaces
-                            .get(workspace_idx)
-                            .cloned()
-                            .unwrap_or_else(|| DesktopWorkspace::placeholder(workspace_idx));
+                                if self.dashboard.focused_monitor_idx == monitor.index {
+                                    ui.label(
+                                        RichText::new("currently focused monitor")
+                                            .color(Color32::LIGHT_GREEN)
+                                            .strong(),
+                                    );
+                                }
+                            });
 
-                        let is_active = self.dashboard.focused_monitor_idx == monitor.index
-                            && monitor.focused_workspace_idx == workspace_idx;
+                            ui.small(format!(
+                                "Everything below changes {} only. The other physical monitor keeps its own internal desktop names, tiling mode, and layouts.",
+                                monitor.short_label()
+                            ));
+                        });
 
-                        let label = workspace.display_name(DESKTOP_LABELS[workspace_idx]);
-
-                        if ui.selectable_label(is_active, label).clicked() {
-                            self.focus_workspace(workspace_idx);
-                        }
-                    }
-                });
-
-                ui.small("Desktop cards below are backed by real komorebi workspaces on the selected monitor.");
-                ui.add_space(12.0);
-
-                ui.columns(DASHBOARD_DESKTOP_COUNT, |columns| {
-                    for (workspace_idx, column) in columns.iter_mut().enumerate() {
-                        let workspace = monitor
-                            .workspaces
-                            .get(workspace_idx)
-                            .cloned()
-                            .unwrap_or_else(|| DesktopWorkspace::placeholder(workspace_idx));
-
-                        let is_focused = self.dashboard.focused_monitor_idx == monitor.index
-                            && monitor.focused_workspace_idx == workspace_idx;
-
-                        self.workspace_card(column, &monitor.short_label(), workspace, is_focused);
-                    }
-                });
-
-                if monitor.workspaces.len() > DASHBOARD_DESKTOP_COUNT {
                     ui.add_space(10.0);
-                    ui.small(format!(
-                        "{} additional desktops exist on this monitor, but they are hidden here to keep the UX focused and low-overhead.",
-                        monitor.workspaces.len() - DASHBOARD_DESKTOP_COUNT
-                    ));
-                }
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(format!(
+                            "Internal desktop currently shown on {}:",
+                            monitor.short_label()
+                        ));
+
+                        for workspace_idx in 0..DASHBOARD_DESKTOP_COUNT {
+                            let workspace = monitor
+                                .workspaces
+                                .get(workspace_idx)
+                                .cloned()
+                                .unwrap_or_else(|| DesktopWorkspace::placeholder(workspace_idx));
+
+                            let is_active = self.dashboard.focused_monitor_idx == monitor.index
+                                && monitor.focused_workspace_idx == workspace_idx;
+
+                            let label = workspace.display_name(DESKTOP_LABELS[workspace_idx]);
+
+                            if ui.selectable_label(is_active, label).clicked() {
+                                self.focus_workspace(workspace_idx);
+                            }
+                        }
+                    });
+
+                    ui.small("The cards below are komorebi's internal desktops for this screen. Most day-to-day moves between TV and Monitor can stay in the physical screen cards above.");
+                    ui.add_space(12.0);
+
+                    ui.columns(DASHBOARD_DESKTOP_COUNT, |columns| {
+                        for (workspace_idx, column) in columns.iter_mut().enumerate() {
+                            let workspace = monitor
+                                .workspaces
+                                .get(workspace_idx)
+                                .cloned()
+                                .unwrap_or_else(|| DesktopWorkspace::placeholder(workspace_idx));
+
+                            let is_focused = self.dashboard.focused_monitor_idx == monitor.index
+                                && monitor.focused_workspace_idx == workspace_idx;
+
+                            self.workspace_card(
+                                column,
+                                &monitor.short_label(),
+                                workspace,
+                                is_focused,
+                            );
+                        }
+                    });
+
+                    if monitor.workspaces.len() > DASHBOARD_DESKTOP_COUNT {
+                        ui.add_space(10.0);
+                        ui.small(format!(
+                            "{} additional internal desktops exist on this monitor, but they are hidden here to keep the UX focused and low-overhead.",
+                            monitor.workspaces.len() - DASHBOARD_DESKTOP_COUNT
+                        ));
+                    }
+                });
             } else {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.heading("No live komorebi session detected");
